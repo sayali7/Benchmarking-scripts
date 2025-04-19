@@ -1,24 +1,33 @@
-
 import os
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
+from sklearn.model_selection import train_test_split
 
 import pandas as pd
 import pickle
 
 
-class ClassificationModel(nn.Module):
-    def __init__(self, input_dim, num_classes):
-        super(ClassificationModel, self).__init__()
-        self.fc = nn.Linear(input_dim, num_classes)
-    
+class MLP(nn.Module):
+    def __init__(self, input_dim, hidden_dims, num_classes):
+        super(MLP, self).__init__()
+        layers = []
+        prev_dim = input_dim
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, h_dim))
+            # layers.append(nn.BatchNorm1d(h_dim))
+            layers.append(nn.ReLU())
+            prev_dim = h_dim
+        # Final output layer
+        layers.append(nn.Linear(prev_dim, num_classes))
+        self.net = nn.Sequential(*layers)
+
     def forward(self, x):
-        return self.fc(x)
+        return self.net(x)
 
 
-def get_file_lists(meta_path, sample_column='SubID', phen_column='c15x'):
+def get_file_lists(meta_path, sample_column='SubID', phen_column='c15x',val_split=0.2, random_state=42):
     # Load train/test split metadata
     with open(meta_path, 'rb') as handle:
         data = pickle.load(handle)
@@ -27,15 +36,27 @@ def get_file_lists(meta_path, sample_column='SubID', phen_column='c15x'):
     data['train'][phen_column] = data['train'][phen_column].map({"AD":1, "Control":0})
     data['test'][phen_column] = data['test'][phen_column].map({"AD":1, "Control":0})
 
-    # Extract lists and label maps
-    train_list = data['train'][sample_column].unique().tolist()
-    train_label_map = dict(zip(data['train'][sample_column], data['train'][phen_column]))
+    df = data['train'].copy()
 
-    return train_list, train_label_map
+    sample_ids = df[sample_column].unique().tolist()
+    labels = [df[df[sample_column] == sid][phen_column].iloc[0] for sid in sample_ids]
+
+    train_ids, val_ids = train_test_split(
+        sample_ids,
+        test_size=val_split,
+        random_state=random_state,
+        stratify=labels
+    )
+
+    label_map = dict(zip(df[sample_column], df[phen_column]))
+    train_label_map = {sid: label_map[sid] for sid in train_ids}
+    val_label_map = {sid: label_map[sid] for sid in val_ids}
+
+    return train_ids, val_ids, train_label_map, val_label_map
 
 
 class EmbDataset(Dataset):
-    def __init__(self, file_list, data_path, label_mapping, cache_data=True, file_format="csv"):
+    def __init__(self, file_list, data_path, label_mapping,scaler=None, cache_data=True, file_format="csv"):
         self.file_list = file_list
         self.data_path = data_path
         self.file_format = file_format
@@ -44,6 +65,7 @@ class EmbDataset(Dataset):
         self.sample_weights = []
         self.cache_data = cache_data
         self.file_cache = {}
+        self.scaler = scaler
 
         # Build index and weights
         for donor in file_list:
@@ -69,8 +91,13 @@ class EmbDataset(Dataset):
             file_path = os.path.join(self.data_path, donor + f".{self.file_format}")
             df = pd.read_csv(file_path, index_col=0) if self.file_format == "csv" else pd.read_parquet(file_path)
         row = df.iloc[local_idx]
-        data = torch.tensor(row.values, dtype=torch.float32)
-        label = torch.tensor(int(self.label_mapping.get(donor, -1)), dtype=torch.long)
+        if self.scaler is not None:
+            row = self.scaler.transform(row.values.reshape(1, -1)).squeeze(0)
+        else:
+            row=row.values
+        data = torch.tensor(row, dtype=torch.float32)
+        label = torch.tensor(int(self.label_mapping.get(donor, -1)), dtype=torch.float32)
         weight = torch.tensor(self.sample_weights[idx], dtype=torch.float32)
         return data, label, weight
+
 
