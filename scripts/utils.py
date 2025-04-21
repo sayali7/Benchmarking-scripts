@@ -16,19 +16,48 @@ class MLP(nn.Module):
         prev_dim = input_dim
         for h_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, h_dim))
-            # layers.append(nn.BatchNorm1d(h_dim))
+            layers.append(nn.BatchNorm1d(h_dim))
             layers.append(nn.ReLU())
             prev_dim = h_dim
-        # Final output layer
         layers.append(nn.Linear(prev_dim, num_classes))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x)
+    
+class LogisticRegressionModel(nn.Module):
+    """
+    Simple logistic regression:
+    linear layer mapping input_dim -> num_classes
+    """
+    def __init__(self, input_dim, num_classes):
+        super(LogisticRegressionModel, self).__init__()
+        self.linear = nn.Linear(input_dim, num_classes)
+
+    def forward(self, x):
+        return self.linear(x)
+    
+def get_model_data_path(model_name):
+    data_path="."
+
+    if model_name=="scGPT":
+        data_path="/media/sayalialatkar/T9/Sayali/FoundationModels/scGPT-main/results/zero-shot/extracted_cell_embeddings_full_body"
+    elif model_name=="UCE":
+        data_path="/media/sayalialatkar/T9/Sayali/FoundationModels/UCE_venv/UCE-main/results/cell_embeddings/extracted_cell_embeddings"
+    elif model_name=="scFoundation":
+        data_path="/media/sayalialatkar/T9/Sayali/FoundationModels/scFoundation/extracted_cell_embeddings"
+    elif model_name=="Geneformer":
+        data_path="/media/sayalialatkar/T9/Sayali/FoundationModels/Geneformer_30M/extracted_cell_embeddings"
+    elif model_name=="scMulan":
+        data_path="/media/sayalialatkar/T9/Sayali/FoundationModels/scMulan-main/results/zero-shot/extracted_cell_embeddings"
+
+    return data_path
 
 
-def get_file_lists(meta_path, sample_column='SubID', phen_column='c15x',val_split=0.2, random_state=42):
-    # Load train/test split metadata
+def get_metadata(meta_path, sample_column='SubID', phen_column='c15x',val_split=0.2, random_state=42):
+    """
+    Load metadata from data['train'] and return sample IDs, labels, and label map.
+    """
     with open(meta_path, 'rb') as handle:
         data = pickle.load(handle)
 
@@ -53,6 +82,23 @@ def get_file_lists(meta_path, sample_column='SubID', phen_column='c15x',val_spli
     val_label_map = {sid: label_map[sid] for sid in val_ids}
 
     return train_ids, val_ids, train_label_map, val_label_map
+
+def get_metadata_cv(meta_path, sample_column='SubID', phen_column='c15x'):
+    """
+    Load metadata from data['train'] and return sample IDs, labels, and label map.
+    """
+    with open(meta_path, 'rb') as handle:
+        data = pickle.load(handle)
+
+    df = data['train'].copy()
+    # Map phenotype labels
+    df[phen_column] = df[phen_column].map({"AD":1, "Control":0})
+    
+    sample_ids = df[sample_column].unique().tolist()
+    labels = [df.loc[df[sample_column] == sid, phen_column].iloc[0] for sid in sample_ids]
+    label_map = dict(zip(df[sample_column], df[phen_column]))
+    
+    return sample_ids, labels, label_map
 
 
 class EmbDataset(Dataset):
