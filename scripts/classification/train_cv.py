@@ -24,9 +24,13 @@ def train(train_ids, train_label_map, val_ids, val_label_map, args, fold_idx=Non
             path = os.path.join(args.data_path, donor + f".{args.file_format}")
             df = pd.read_csv(path, index_col=0) if args.file_format == 'csv' else pd.read_parquet(path)
             scaler.partial_fit(df.values)
-    
-    train_ds = EmbDataset(train_ids, args.data_path, train_label_map, scaler, True, args.file_format)
-    val_ds   = EmbDataset(val_ids,   args.data_path, val_label_map,   scaler, True, args.file_format)
+
+    if args.cell_level:
+        train_ds = EmbDataset(train_ids, args.data_path, train_label_map, scaler, True, args.file_format)
+        val_ds   = EmbDataset(val_ids,   args.data_path, val_label_map,   scaler, True, args.file_format)
+    else:
+        train_ds = DonorDataset(train_ids, args.data_path, train_label_map, scaler, True, args.file_format)
+        val_ds   = DonorDataset(val_ids,   args.data_path, val_label_map,   scaler, True, args.file_format)
     
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, pin_memory=torch.cuda.is_available())
@@ -45,7 +49,11 @@ def train(train_ids, train_label_map, val_ids, val_label_map, args, fold_idx=Non
              else MLP(input_dim, hidden_dims, num_classes)).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss().to(device)
+
+    if num_classes>1:
+        criterion = nn.CrossEntropyLoss()
+    else:
+        criterion = nn.BCEWithLogitsLoss().to(device)
     
     # train epochs
     print ("Training init...")
@@ -58,12 +66,14 @@ def train(train_ids, train_label_map, val_ids, val_label_map, args, fold_idx=Non
         for i, (bx, by, batch_weights) in enumerate(
             tqdm.tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
         ):
-            bx, by = bx.to(device), by.to(device).unsqueeze(1)
+            bx, by = bx.to(device), by.to(device).long() # Modified for CE Loss from by.to(device).unsqueeze(1).float()
             optimizer.zero_grad()
             out = model(bx); loss = criterion(out, by)
             loss.backward(); optimizer.step()
             total_loss += loss.item() * bx.size(0)
-            preds.extend((out>0).long().cpu().tolist()); truths.extend(by.cpu().long().tolist())
+            # preds.extend((out>0).long().cpu().tolist()); 
+            preds.extend(out.argmax(dim=1).cpu().tolist())
+            truths.extend(by.cpu().long().tolist())
         train_loss = total_loss / len(train_loader.dataset)
         train_bal  = balanced_accuracy_score(truths, preds)
     
@@ -75,10 +85,12 @@ def train(train_ids, train_label_map, val_ids, val_label_map, args, fold_idx=Non
     
     with torch.no_grad():
         for bx, by, wt in val_loader:
-            bx, by = bx.to(device), by.to(device).unsqueeze(1)
+            bx, by = bx.to(device), by.to(device).long() # Modified for CE Loss from by.to(device).unsqueeze(1).float()
             out = model(bx); loss = criterion(out,by).mean().item()
             bs = by.size(0); total_val_loss += loss*bs; count+=bs
-            vpreds.extend((out>0).long().cpu().tolist()); vtruths.extend(by.cpu().long().tolist())
+            # vpreds.extend((out>0).long().cpu().tolist()); 
+            vpreds.extend(out.argmax(dim=1).cpu().tolist())
+            vtruths.extend(by.cpu().long().tolist())
     avg_val_loss = total_val_loss/count if count else 0
     avg_bal      = balanced_accuracy_score(vtruths, vpreds)
     logger.info(f"Complete training{' fold '+str(fold_idx) if fold_idx else ''}...")
@@ -186,13 +198,15 @@ def main():
                         help="Validation splits.")
     parser.add_argument('--accumulation_steps', type=int, default=0,
                         help="Number of steps to accumulate gradients before updating.")
-    parser.add_argument('--num_workers', type=int, default=2,
+    parser.add_argument('--num_workers', type=int, default=0,
                         help="Number of DataLoader worker threads.")
     parser.add_argument('--do_cv', action='store_true',
                         help='Run 5-fold cross validation')
     parser.add_argument('--log_file', type=str,
                         default='/media/sayalialatkar/T9/Sayali/FoundationModels/scBrainLLM/results/train.log',
                         help="File to write training logs to (default: train.log)")
+    parser.add_argument('--cell_level', action='store_true',
+                        help="Flag to specify donor-level or cell-level classification.")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
